@@ -1,3 +1,25 @@
+// Firebaseライブラリの読み込み
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-app.js";
+import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-analytics.js";
+import { getFirestore } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-firestore.js";
+
+// あなたのFirebase設定
+const firebaseConfig = {
+  apiKey: "AIzaSyCa_bbbSS12SuMZD1b2BK673q59129b6rs",
+  authDomain: "cupid-2fde6.firebaseapp.com",
+  projectId: "cupid-2fde6",
+  storageBucket: "cupid-2fde6.firebasestorage.app",
+  messagingSenderId: "556101305124",
+  appId: "1:556101305124:web:f8b91752c4391efb15a9b1",
+  measurementId: "G-8N2Z5EWY9C"
+};
+
+// 初期化
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
+const db = getFirestore(app); // 💡今後、データの保存や取得にはこの「db」を使います
+
+// --- 💡ここから下に、もともとの app.js の中身（ボタンのクリックイベントやマッチングのロジックなど）を続けて書いていきます ---
 const authScreen = document.getElementById('auth-screen');
 const mainScreen = document.getElementById('main-screen');
 const authForm = document.getElementById('auth-form');
