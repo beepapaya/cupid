@@ -1,7 +1,7 @@
 // Firebaseライブラリの読み込み
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-app.js";
 import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-analytics.js";
-import { getFirestore } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-firestore.js";
+import { getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, onSnapshot } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-firestore.js";
 
 // あなたのFirebase設定
 const firebaseConfig = {
@@ -34,6 +34,7 @@ const partnerFirstNameInput = document.getElementById('partner-first-name');
 
 let currentUser = null;
 let currentUserId = null;
+let unsubscribeUsers = null; // リアルタイムリスナー解除用
 
 function generateUserId(name, additionalInfo = '') {
     return btoa(encodeURIComponent(`${normalizeName(name)}_${additionalInfo}`));
@@ -50,23 +51,19 @@ function isValidKana(str) {
     return /^[ぁ-んァ-ヶー]+$/.test(str);
 }
 
-function getUsers() {
-    return JSON.parse(localStorage.getItem('couple_users') || '{}');
-}
-
-function saveUsers(users) {
-    localStorage.setItem('couple_users', JSON.stringify(users));
-}
-
-function init() {
+async function init() {
     const loggedInId = localStorage.getItem('currentUserId');
     if (loggedInId) {
-        const users = getUsers();
-        if (users[loggedInId]) {
-            currentUserId = loggedInId;
-            currentUser = users[loggedInId];
-            showMainScreen();
-            return;
+        try {
+            const userDocSnap = await getDoc(doc(db, "users", loggedInId));
+            if (userDocSnap.exists()) {
+                currentUserId = loggedInId;
+                currentUser = userDocSnap.data();
+                showMainScreen();
+                return;
+            }
+        } catch (error) {
+            console.error("Failed to load user during init:", error);
         }
     }
     showAuthScreen();
@@ -75,7 +72,7 @@ function init() {
 function showAuthScreen() {
     authScreen.classList.add('active');
     mainScreen.classList.remove('active');
-    window.removeEventListener('storage', onStorageChange);
+    stopFirestoreSync();
 }
 
 function showMainScreen() {
@@ -95,21 +92,42 @@ function showMainScreen() {
         btn.textContent = 'この人を指名する！';
     }
 
-    updateStatus();
-    window.addEventListener('storage', onStorageChange);
+    updateStatus(null);
+    startFirestoreSync();
 }
 
-function onStorageChange(e) {
-    if (e.key === 'couple_users') {
-        const users = JSON.parse(e.newValue || '{}');
+function startFirestoreSync() {
+    if (unsubscribeUsers) {
+        unsubscribeUsers();
+    }
+    
+    const usersRef = collection(db, "users");
+    unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
+        const users = {};
+        snapshot.forEach((doc) => {
+            users[doc.id] = doc.data();
+        });
+        
         if (currentUserId && users[currentUserId]) {
             currentUser = users[currentUserId];
-            updateStatus();
+            displayName.textContent = currentUser.name;
+            updateStatus(users);
+        } else if (currentUserId) {
+            logout();
         }
+    }, (error) => {
+        console.error("Firestore sync error:", error);
+    });
+}
+
+function stopFirestoreSync() {
+    if (unsubscribeUsers) {
+        unsubscribeUsers();
+        unsubscribeUsers = null;
     }
 }
 
-function updateStatus() {
+function updateStatus(users) {
     const nominated = currentUser.nominated;
 
     if (!nominated) {
@@ -118,7 +136,11 @@ function updateStatus() {
         return;
     }
 
-    const users = getUsers();
+    if (!users) {
+        statusBox.className = 'status-box';
+        statusBox.innerHTML = `<p>💘 ${nominated.name} さんを指名中...</p><small>接続中...</small>`;
+        return;
+    }
     
     let isMatched = false;
     for (let id in users) {
@@ -159,7 +181,7 @@ function updateStatus() {
     }
 }
 
-authForm.addEventListener('submit', (e) => {
+authForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     authError.textContent = '';
     
@@ -182,22 +204,27 @@ authForm.addEventListener('submit', (e) => {
 
         const name = `${lastName} ${firstName}`;
         const normalizedInputName = normalizeName(name);
-        const users = getUsers();
+        
+        // Firestoreから同じ normalizedName のユーザーを検索
+        const usersRef = collection(db, "users");
+        const q = query(usersRef, where("normalizedName", "==", normalizedInputName));
+        const querySnapshot = await getDocs(q);
         
         let foundSameNameUser = null;
-        for (let id in users) {
-            if (users[id].normalizedName === normalizedInputName) {
-                if (users[id].password === password) {
-                    foundSameNameUser = users[id];
-                    break;
-                }
+        let hasSameName = false;
+        
+        querySnapshot.forEach((docSnap) => {
+            hasSameName = true;
+            const userData = docSnap.data();
+            if (userData.password === password) {
+                foundSameNameUser = { id: docSnap.id, ...userData };
             }
-        }
+        });
 
         const registeredUserId = localStorage.getItem('registeredUserId');
 
         if (foundSameNameUser) {
-            const loginUserId = generateUserId(foundSameNameUser.name, foundSameNameUser.additionalInfo);
+            const loginUserId = foundSameNameUser.id;
             if (registeredUserId && registeredUserId !== loginUserId) {
                 authError.textContent = 'この端末からはすでに別のアカウントが登録されています。1端末につき1名のみ利用可能です。';
                 submitBtn.disabled = false;
@@ -208,14 +235,6 @@ authForm.addEventListener('submit', (e) => {
             localStorage.setItem('currentUserId', currentUserId);
             showMainScreen();
         } else {
-            let hasSameName = false;
-            for (let id in users) {
-                if (users[id].normalizedName === normalizedInputName) {
-                    hasSameName = true;
-                    break;
-                }
-            }
-
             if (hasSameName && !additionalInfo) {
                 additionalInfoGroup.style.display = 'block';
                 authError.textContent = '同じ名前の方が既にいます。追加情報を入力してください。';
@@ -231,7 +250,9 @@ authForm.addEventListener('submit', (e) => {
                 return;
             }
 
-            if (users[userId]) {
+            const userDocRef = doc(db, "users", userId);
+            const userDocSnap = await getDoc(userDocRef);
+            if (userDocSnap.exists()) {
                 authError.textContent = 'その追加情報を持つ同姓同名の方が既にいます。別の情報を入力してください。';
                 submitBtn.disabled = false;
                 return;
@@ -245,8 +266,8 @@ authForm.addEventListener('submit', (e) => {
                 nominated: null,
                 createdAt: Date.now()
             };
-            users[userId] = newUser;
-            saveUsers(users);
+            
+            await setDoc(userDocRef, newUser);
             
             currentUser = newUser;
             currentUserId = userId;
@@ -262,14 +283,16 @@ authForm.addEventListener('submit', (e) => {
     submitBtn.disabled = false;
 });
 
-logoutBtn.addEventListener('click', () => {
+function logout() {
     localStorage.removeItem('currentUserId');
     currentUser = null;
     currentUserId = null;
     showAuthScreen();
-});
+}
 
-nominateForm.addEventListener('submit', (e) => {
+logoutBtn.addEventListener('click', logout);
+
+nominateForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     nominateError.textContent = '';
     
@@ -311,13 +334,17 @@ nominateForm.addEventListener('submit', (e) => {
             }
         }
 
-        const users = getUsers();
+        // Firestoreから全てのユーザーを取得して候補者を探す
+        const usersRef = collection(db, "users");
+        const querySnapshot = await getDocs(usersRef);
         const candidates = [];
-        for (let id in users) {
-            if (users[id].normalizedName === normalizeName(partnerName)) {
-                candidates.push({ id, ...users[id] });
+        
+        querySnapshot.forEach((docSnap) => {
+            const userData = docSnap.data();
+            if (userData.normalizedName === normalizeName(partnerName)) {
+                candidates.push({ id: docSnap.id, ...userData });
             }
-        }
+        });
 
         if (candidates.length > 1) {
             const selectionModal = document.getElementById('selection-modal');
@@ -331,9 +358,9 @@ nominateForm.addEventListener('submit', (e) => {
                     <strong>${candidate.name}</strong>
                     <small>${candidate.additionalInfo || '追加情報なし'}</small>
                 `;
-                item.onclick = () => {
+                item.onclick = async () => {
                     selectionModal.classList.remove('active');
-                    processNomination(candidate.id, candidate.name);
+                    await processNomination(candidate.id, candidate.name);
                 };
                 selectionList.appendChild(item);
             });
@@ -347,32 +374,40 @@ nominateForm.addEventListener('submit', (e) => {
             };
             return;
         } else if (candidates.length === 1) {
-            processNomination(candidates[0].id, partnerName);
+            await processNomination(candidates[0].id, partnerName);
         } else {
-            processNomination(null, partnerName);
+            await processNomination(null, partnerName);
         }
 
-        function processNomination(targetId, targetName) {
-            users[currentUserId].nominated = {
-                name: targetName,
-                targetId: targetId,
-                timestamp: Date.now()
-            };
-            saveUsers(users);
-            
-            currentUser = users[currentUserId];
-            updateStatus();
-            nominateError.textContent = '';
-            
-            submitBtn.textContent = '変更は一週間に一度';
-            submitBtn.style.backgroundColor = '#2ed573';
-            submitBtn.style.color = 'white';
-            setTimeout(() => {
-                submitBtn.textContent = '思い人変更';
-                submitBtn.style.backgroundColor = '';
-                submitBtn.style.color = '';
-            }, 2000);
-            submitBtn.disabled = false;
+        async function processNomination(targetId, targetName) {
+            try {
+                const nominationData = {
+                    name: targetName,
+                    targetId: targetId,
+                    timestamp: Date.now()
+                };
+                
+                const userDocRef = doc(db, "users", currentUserId);
+                await updateDoc(userDocRef, {
+                    nominated: nominationData
+                });
+                
+                nominateError.textContent = '';
+                
+                submitBtn.textContent = '変更は一週間に一度';
+                submitBtn.style.backgroundColor = '#2ed573';
+                submitBtn.style.color = 'white';
+                setTimeout(() => {
+                    submitBtn.textContent = '思い人変更';
+                    submitBtn.style.backgroundColor = '';
+                    submitBtn.style.color = '';
+                }, 2000);
+            } catch (err) {
+                console.error(err);
+                nominateError.textContent = '登録中にエラーが発生しました。';
+            } finally {
+                submitBtn.disabled = false;
+            }
         }
         
     } catch (error) {
