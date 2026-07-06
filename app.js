@@ -1,25 +1,6 @@
-// Firebaseライブラリの読み込み
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-app.js";
-import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-analytics.js";
-import { getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, onSnapshot } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-firestore.js";
+const KVDB_BUCKET = 'WNpfV5hpjg9S2VcHncXawu'; // ここにKVdbのバケットID（またはAPIのURL）を入力してください
+const KVDB_URL = `https://kvdb.io/${KVDB_BUCKET}/couple_users`;
 
-// あなたのFirebase設定
-const firebaseConfig = {
-  apiKey: "AIzaSyCa_bbbSS12SuMZD1b2BK673q59129b6rs",
-  authDomain: "cupid-2fde6.firebaseapp.com",
-  projectId: "cupid-2fde6",
-  storageBucket: "cupid-2fde6.firebasestorage.app",
-  messagingSenderId: "556101305124",
-  appId: "1:556101305124:web:f8b91752c4391efb15a9b1",
-  measurementId: "G-8N2Z5EWY9C"
-};
-
-// 初期化
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
-const db = getFirestore(app); // 💡今後、データの保存や取得にはこの「db」を使います
-
-// --- 💡ここから下に、もともとの app.js の中身（ボタンのクリックイベントやマッチングのロジックなど）を続けて書いていきます ---
 const authScreen = document.getElementById('auth-screen');
 const mainScreen = document.getElementById('main-screen');
 const authForm = document.getElementById('auth-form');
@@ -34,7 +15,7 @@ const partnerFirstNameInput = document.getElementById('partner-first-name');
 
 let currentUser = null;
 let currentUserId = null;
-let unsubscribeUsers = null; // リアルタイムリスナー解除用
+let pollInterval = null;
 
 function generateUserId(name, additionalInfo = '') {
     return btoa(encodeURIComponent(`${normalizeName(name)}_${additionalInfo}`));
@@ -51,19 +32,51 @@ function isValidKana(str) {
     return /^[ぁ-んァ-ヶー]+$/.test(str);
 }
 
+// ユーザー一覧を取得する（非同期）
+async function getUsers() {
+    if (KVDB_BUCKET === 'YOUR_KVDB_BUCKET_ID') {
+        return JSON.parse(localStorage.getItem('couple_users') || '{}');
+    }
+    try {
+        const response = await fetch(KVDB_URL);
+        if (response.ok) {
+            const data = await response.json();
+            return data || {};
+        } else if (response.status === 404) {
+            return {}; // まだデータがない場合
+        }
+        return JSON.parse(localStorage.getItem('couple_users') || '{}');
+    } catch (error) {
+        console.error('Error fetching users:', error);
+        return JSON.parse(localStorage.getItem('couple_users') || '{}');
+    }
+}
+
+// ユーザー一覧を保存する（非同期）
+async function saveUsers(users) {
+    localStorage.setItem('couple_users', JSON.stringify(users)); // ローカルにもバックアップとして保存
+    if (KVDB_BUCKET === 'YOUR_KVDB_BUCKET_ID') return;
+    
+    try {
+        await fetch(KVDB_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(users)
+        });
+    } catch (error) {
+        console.error('Error saving users:', error);
+    }
+}
+
 async function init() {
     const loggedInId = localStorage.getItem('currentUserId');
     if (loggedInId) {
-        try {
-            const userDocSnap = await getDoc(doc(db, "users", loggedInId));
-            if (userDocSnap.exists()) {
-                currentUserId = loggedInId;
-                currentUser = userDocSnap.data();
-                showMainScreen();
-                return;
-            }
-        } catch (error) {
-            console.error("Failed to load user during init:", error);
+        const users = await getUsers();
+        if (users[loggedInId]) {
+            currentUserId = loggedInId;
+            currentUser = users[loggedInId];
+            showMainScreen();
+            return;
         }
     }
     showAuthScreen();
@@ -72,7 +85,10 @@ async function init() {
 function showAuthScreen() {
     authScreen.classList.add('active');
     mainScreen.classList.remove('active');
-    stopFirestoreSync();
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
 }
 
 function showMainScreen() {
@@ -92,42 +108,15 @@ function showMainScreen() {
         btn.textContent = 'この人を指名する！';
     }
 
-    updateStatus(null);
-    startFirestoreSync();
-}
-
-function startFirestoreSync() {
-    if (unsubscribeUsers) {
-        unsubscribeUsers();
-    }
+    updateStatus();
     
-    const usersRef = collection(db, "users");
-    unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
-        const users = {};
-        snapshot.forEach((doc) => {
-            users[doc.id] = doc.data();
-        });
-        
-        if (currentUserId && users[currentUserId]) {
-            currentUser = users[currentUserId];
-            displayName.textContent = currentUser.name;
-            updateStatus(users);
-        } else if (currentUserId) {
-            logout();
-        }
-    }, (error) => {
-        console.error("Firestore sync error:", error);
-    });
-}
-
-function stopFirestoreSync() {
-    if (unsubscribeUsers) {
-        unsubscribeUsers();
-        unsubscribeUsers = null;
+    // 他のユーザーの変更を検知するために定期的にステータスを更新する
+    if (!pollInterval) {
+        pollInterval = setInterval(updateStatus, 10000); // 10秒ごと
     }
 }
 
-function updateStatus(users) {
+async function updateStatus() {
     const nominated = currentUser.nominated;
 
     if (!nominated) {
@@ -136,10 +125,10 @@ function updateStatus(users) {
         return;
     }
 
-    if (!users) {
-        statusBox.className = 'status-box';
-        statusBox.innerHTML = `<p>💘 ${nominated.name} さんを指名中...</p><small>接続中...</small>`;
-        return;
+    const users = await getUsers();
+    // 他端末での更新を反映
+    if (users[currentUserId]) {
+        currentUser = users[currentUserId];
     }
     
     let isMatched = false;
@@ -204,27 +193,22 @@ authForm.addEventListener('submit', async (e) => {
 
         const name = `${lastName} ${firstName}`;
         const normalizedInputName = normalizeName(name);
-        
-        // Firestoreから同じ normalizedName のユーザーを検索
-        const usersRef = collection(db, "users");
-        const q = query(usersRef, where("normalizedName", "==", normalizedInputName));
-        const querySnapshot = await getDocs(q);
+        const users = await getUsers();
         
         let foundSameNameUser = null;
-        let hasSameName = false;
-        
-        querySnapshot.forEach((docSnap) => {
-            hasSameName = true;
-            const userData = docSnap.data();
-            if (userData.password === password) {
-                foundSameNameUser = { id: docSnap.id, ...userData };
+        for (let id in users) {
+            if (users[id].normalizedName === normalizedInputName) {
+                if (users[id].password === password) {
+                    foundSameNameUser = users[id];
+                    break;
+                }
             }
-        });
+        }
 
         const registeredUserId = localStorage.getItem('registeredUserId');
 
         if (foundSameNameUser) {
-            const loginUserId = foundSameNameUser.id;
+            const loginUserId = generateUserId(foundSameNameUser.name, foundSameNameUser.additionalInfo);
             if (registeredUserId && registeredUserId !== loginUserId) {
                 authError.textContent = 'この端末からはすでに別のアカウントが登録されています。1端末につき1名のみ利用可能です。';
                 submitBtn.disabled = false;
@@ -235,6 +219,14 @@ authForm.addEventListener('submit', async (e) => {
             localStorage.setItem('currentUserId', currentUserId);
             showMainScreen();
         } else {
+            let hasSameName = false;
+            for (let id in users) {
+                if (users[id].normalizedName === normalizedInputName) {
+                    hasSameName = true;
+                    break;
+                }
+            }
+
             if (hasSameName && !additionalInfo) {
                 additionalInfoGroup.style.display = 'block';
                 authError.textContent = '同じ名前の方が既にいます。追加情報を入力してください。';
@@ -250,9 +242,7 @@ authForm.addEventListener('submit', async (e) => {
                 return;
             }
 
-            const userDocRef = doc(db, "users", userId);
-            const userDocSnap = await getDoc(userDocRef);
-            if (userDocSnap.exists()) {
+            if (users[userId]) {
                 authError.textContent = 'その追加情報を持つ同姓同名の方が既にいます。別の情報を入力してください。';
                 submitBtn.disabled = false;
                 return;
@@ -266,8 +256,8 @@ authForm.addEventListener('submit', async (e) => {
                 nominated: null,
                 createdAt: Date.now()
             };
-            
-            await setDoc(userDocRef, newUser);
+            users[userId] = newUser;
+            await saveUsers(users);
             
             currentUser = newUser;
             currentUserId = userId;
@@ -283,14 +273,12 @@ authForm.addEventListener('submit', async (e) => {
     submitBtn.disabled = false;
 });
 
-function logout() {
+logoutBtn.addEventListener('click', () => {
     localStorage.removeItem('currentUserId');
     currentUser = null;
     currentUserId = null;
     showAuthScreen();
-}
-
-logoutBtn.addEventListener('click', logout);
+});
 
 nominateForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -334,17 +322,13 @@ nominateForm.addEventListener('submit', async (e) => {
             }
         }
 
-        // Firestoreから全てのユーザーを取得して候補者を探す
-        const usersRef = collection(db, "users");
-        const querySnapshot = await getDocs(usersRef);
+        const users = await getUsers();
         const candidates = [];
-        
-        querySnapshot.forEach((docSnap) => {
-            const userData = docSnap.data();
-            if (userData.normalizedName === normalizeName(partnerName)) {
-                candidates.push({ id: docSnap.id, ...userData });
+        for (let id in users) {
+            if (users[id].normalizedName === normalizeName(partnerName)) {
+                candidates.push({ id, ...users[id] });
             }
-        });
+        }
 
         if (candidates.length > 1) {
             const selectionModal = document.getElementById('selection-modal');
@@ -358,9 +342,9 @@ nominateForm.addEventListener('submit', async (e) => {
                     <strong>${candidate.name}</strong>
                     <small>${candidate.additionalInfo || '追加情報なし'}</small>
                 `;
-                item.onclick = async () => {
+                item.onclick = () => {
                     selectionModal.classList.remove('active');
-                    await processNomination(candidate.id, candidate.name);
+                    processNomination(candidate.id, candidate.name);
                 };
                 selectionList.appendChild(item);
             });
@@ -374,40 +358,32 @@ nominateForm.addEventListener('submit', async (e) => {
             };
             return;
         } else if (candidates.length === 1) {
-            await processNomination(candidates[0].id, partnerName);
+            processNomination(candidates[0].id, partnerName);
         } else {
-            await processNomination(null, partnerName);
+            processNomination(null, partnerName);
         }
 
         async function processNomination(targetId, targetName) {
-            try {
-                const nominationData = {
-                    name: targetName,
-                    targetId: targetId,
-                    timestamp: Date.now()
-                };
-                
-                const userDocRef = doc(db, "users", currentUserId);
-                await updateDoc(userDocRef, {
-                    nominated: nominationData
-                });
-                
-                nominateError.textContent = '';
-                
-                submitBtn.textContent = '変更は一週間に一度';
-                submitBtn.style.backgroundColor = '#2ed573';
-                submitBtn.style.color = 'white';
-                setTimeout(() => {
-                    submitBtn.textContent = '思い人変更';
-                    submitBtn.style.backgroundColor = '';
-                    submitBtn.style.color = '';
-                }, 2000);
-            } catch (err) {
-                console.error(err);
-                nominateError.textContent = '登録中にエラーが発生しました。';
-            } finally {
-                submitBtn.disabled = false;
-            }
+            users[currentUserId].nominated = {
+                name: targetName,
+                targetId: targetId,
+                timestamp: Date.now()
+            };
+            await saveUsers(users);
+            
+            currentUser = users[currentUserId];
+            await updateStatus();
+            nominateError.textContent = '';
+            
+            submitBtn.textContent = '変更は一週間に一度';
+            submitBtn.style.backgroundColor = '#2ed573';
+            submitBtn.style.color = 'white';
+            setTimeout(() => {
+                submitBtn.textContent = '思い人変更';
+                submitBtn.style.backgroundColor = '';
+                submitBtn.style.color = '';
+            }, 2000);
+            submitBtn.disabled = false;
         }
         
     } catch (error) {
