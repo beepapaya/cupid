@@ -1,5 +1,4 @@
-const KVDB_BUCKET = 'WNpfV5hpjg9S2VcHncXawu'; // ここにKVdbのバケットID（またはAPIのURL）を入力してください
-const KVDB_URL = `https://kvdb.io/${KVDB_BUCKET}/couple_users`;
+const FIREBASE_URL = 'https://cupid-2fde6-default-rtdb.firebaseio.com/couple_users.json';
 
 const authScreen = document.getElementById('auth-screen');
 const mainScreen = document.getElementById('main-screen');
@@ -32,18 +31,25 @@ function isValidKana(str) {
     return /^[ぁ-んァ-ヶー]+$/.test(str);
 }
 
+function getFriendlyErrorMessage(error) {
+    if (error && error.message) {
+        if (error.message.includes('Permission denied') || error.message.toLowerCase().includes('permission')) {
+            return 'データベースのアクセス権限エラーです。FirebaseのRealtime Databaseで「ルール」タブを開き、読み書きが許可されている（".read": true, ".write": true）か確認してください。';
+        }
+    }
+    return 'エラーが発生しました。時間を置いて再度お試しください。';
+}
+
 // ユーザー一覧を取得する（非同期）
 async function getUsers() {
-    if (KVDB_BUCKET === 'YOUR_KVDB_BUCKET_ID') {
-        return JSON.parse(localStorage.getItem('couple_users') || '{}');
-    }
     try {
-        const response = await fetch(KVDB_URL);
+        const response = await fetch(FIREBASE_URL);
         if (response.ok) {
             const data = await response.json();
-            return data || {};
-        } else if (response.status === 404) {
-            return {}; // まだデータがない場合
+            if (data === null) {
+                return JSON.parse(localStorage.getItem('couple_users') || '{}');
+            }
+            return data;
         }
         return JSON.parse(localStorage.getItem('couple_users') || '{}');
     } catch (error) {
@@ -55,16 +61,20 @@ async function getUsers() {
 // ユーザー一覧を保存する（非同期）
 async function saveUsers(users) {
     localStorage.setItem('couple_users', JSON.stringify(users)); // ローカルにもバックアップとして保存
-    if (KVDB_BUCKET === 'YOUR_KVDB_BUCKET_ID') return;
     
     try {
-        await fetch(KVDB_URL, {
-            method: 'POST',
+        const response = await fetch(FIREBASE_URL, {
+            method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(users)
         });
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(errorText || `HTTP error ${response.status}`);
+        }
     } catch (error) {
         console.error('Error saving users:', error);
+        throw error;
     }
 }
 
@@ -267,7 +277,7 @@ authForm.addEventListener('submit', async (e) => {
         }
     } catch (error) {
         console.error(error);
-        authError.textContent = 'エラーが発生しました。';
+        authError.textContent = getFriendlyErrorMessage(error);
     }
     
     submitBtn.disabled = false;
@@ -358,37 +368,43 @@ nominateForm.addEventListener('submit', async (e) => {
             };
             return;
         } else if (candidates.length === 1) {
-            processNomination(candidates[0].id, partnerName);
+            await processNomination(candidates[0].id, partnerName);
         } else {
-            processNomination(null, partnerName);
+            await processNomination(null, partnerName);
         }
 
         async function processNomination(targetId, targetName) {
-            users[currentUserId].nominated = {
-                name: targetName,
-                targetId: targetId,
-                timestamp: Date.now()
-            };
-            await saveUsers(users);
-            
-            currentUser = users[currentUserId];
-            await updateStatus();
-            nominateError.textContent = '';
-            
-            submitBtn.textContent = '変更は一週間に一度';
-            submitBtn.style.backgroundColor = '#2ed573';
-            submitBtn.style.color = 'white';
-            setTimeout(() => {
-                submitBtn.textContent = '思い人変更';
-                submitBtn.style.backgroundColor = '';
-                submitBtn.style.color = '';
-            }, 2000);
-            submitBtn.disabled = false;
+            try {
+                users[currentUserId].nominated = {
+                    name: targetName,
+                    targetId: targetId,
+                    timestamp: Date.now()
+                };
+                await saveUsers(users);
+                
+                currentUser = users[currentUserId];
+                await updateStatus();
+                nominateError.textContent = '';
+                
+                submitBtn.textContent = '変更は一週間に一度';
+                submitBtn.style.backgroundColor = '#2ed573';
+                submitBtn.style.color = 'white';
+                setTimeout(() => {
+                    submitBtn.textContent = '思い人変更';
+                    submitBtn.style.backgroundColor = '';
+                    submitBtn.style.color = '';
+                }, 2000);
+                submitBtn.disabled = false;
+            } catch (error) {
+                console.error(error);
+                nominateError.textContent = getFriendlyErrorMessage(error);
+                submitBtn.disabled = false;
+            }
         }
         
     } catch (error) {
         console.error(error);
-        nominateError.textContent = 'エラーが発生しました。';
+        nominateError.textContent = getFriendlyErrorMessage(error);
         submitBtn.disabled = false;
     }
 });
